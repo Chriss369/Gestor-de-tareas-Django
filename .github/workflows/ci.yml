@@ -1,0 +1,111 @@
+# Ubicación en el repo: .github/workflows/ci.yml
+name: CI-CD Django
+
+on:
+  push:
+    branches: [main, ci-setup]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: django-app
+
+jobs:
+  # ---------- SESIÓN 1: Integración continua ----------
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: testdb
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DB_NAME: testdb
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_HOST: localhost
+      DB_PORT: 5432
+      SECRET_KEY: clave-solo-para-ci
+      DEBUG: "True"
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar tests
+        run: python manage.py test
+
+  # ---------- SESIÓN 3: Build de la imagen Docker ----------
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construir imagen Docker
+        run: docker build -t $IMAGE_NAME:latest .
+
+      - name: Exportar imagen como archivo .tar
+        run: docker save $IMAGE_NAME:latest -o $IMAGE_NAME.tar
+
+      - name: Guardar artefacto en GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: ${{ env.IMAGE_NAME }}.tar
+          retention-days: 7
+
+      # Simulado: así se publicaría en DockerHub (descomentar con secretos reales)
+      # - name: Login DockerHub
+      #   uses: docker/login-action@v3
+      #   with:
+      #     username: ${{ secrets.DOCKERHUB_USER }}
+      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # - run: docker tag $IMAGE_NAME:latest ${{ secrets.DOCKERHUB_USER }}/$IMAGE_NAME:latest
+      # - run: docker push ${{ secrets.DOCKERHUB_USER }}/$IMAGE_NAME:latest
+
+  # ---------- SESIÓN 3/4: Simulación de despliegue ----------
+  deploy-sim:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descargar artefacto
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Cargar imagen
+        run: docker load -i $IMAGE_NAME.tar
+
+      - name: Levantar con Docker Compose (carpeta externa simulada)
+        run: |
+          mkdir -p /tmp/deploy
+          cp docker-compose.yml /tmp/deploy/
+          cd /tmp/deploy
+          docker compose up -d
+          sleep 25
+          docker compose ps
+
+      - name: Validar que la app responde
+        run: curl -I http://localhost:8000/ || (cd /tmp/deploy && docker compose logs && exit 1)
